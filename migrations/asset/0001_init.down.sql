@@ -1,0 +1,6 @@
+SET search_path TO asset;
+DROP TABLE IF EXISTS note_shares;
+DROP TABLE IF EXISTS folder_shares;
+DROP TABLE IF EXISTS notes;
+DROP TABLE IF EXISTS folders;
+DROP SCHEMA IF EXISTS asset CASCADE;

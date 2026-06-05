@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.25"
+  MODULES: pkg tools/migrator services/auth services/team services/asset services/audit-worker
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Install golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.12.2
+          args: --version
+      - name: Lint each module
+        run: |
+          for m in $MODULES; do
+            echo "== lint $m =="
+            (cd "$m" && golangci-lint run ./...) || exit 1
+          done
+
+  unit:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Build
+        run: |
+          for m in $MODULES; do (cd "$m" && go build ./...) || exit 1; done
+      - name: Test (short)
+        run: |
+          for m in $MODULES; do
+            (cd "$m" && go test ./... -race -short -coverprofile=coverage.out -covermode=atomic) || exit 1
+          done
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: '**/coverage.out'
+          if-no-files-found: ignore
+
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [unit]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Verify Docker available
+        run: docker version && docker compose version
+      - name: Integration tests
+        env:
+          TESTCONTAINERS_REUSE_ENABLE: "false"
+        run: |
+          for m in $MODULES; do
+            echo "== test-int $m =="
+            (cd "$m" && go test ./... -race -tags=integration -timeout=10m) || exit 1
+          done
+
+  e2e:
+    name: End-to-End
+    runs-on: ubuntu-latest
+    needs: [unit, integration]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build images + bring stack up
+        run: |
+          docker compose build
+          docker compose up -d
+      - name: Wait for services
+        run: |
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8081/healthz >/dev/null && \
+            curl -fsS http://localhost:8082/healthz >/dev/null && \
+            curl -fsS http://localhost:8083/healthz >/dev/null && break
+            sleep 2
+          done
+      - name: Run e2e scripts
+        run: bash scripts/e2e/run_all.sh
+      - name: Compose logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

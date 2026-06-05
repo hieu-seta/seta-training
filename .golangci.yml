@@ -1,0 +1,59 @@
+version: "2"
+
+run:
+  timeout: 5m
+  go: "1.25"
+
+linters:
+  default: standard
+  enable:
+    - revive
+    - gosec
+    - sqlclosecheck
+    - bodyclose
+    - errorlint
+    - gocritic
+    - noctx
+    - prealloc
+    - nolintlint
+    - misspell
+    - unconvert
+    - unparam
+
+  settings:
+    revive:
+      rules:
+        - name: exported
+          arguments:
+            - disableStutteringCheck
+    gosec:
+      excludes:
+        - G404 # math/rand acceptable for non-crypto
+    gocritic:
+      enabled-tags:
+        - performance
+        - style
+      disabled-checks:
+        - hugeParam
+        - rangeValCopy
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - errcheck
+          - prealloc
+      - path: cmd/
+        linters:
+          - revive
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+output:
+  formats:
+    text:
+      path: stdout
