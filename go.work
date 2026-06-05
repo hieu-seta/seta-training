@@ -1,0 +1,10 @@
+go 1.25.0
+
+use (
+	./pkg
+	./services/asset
+	./services/audit-worker
+	./services/auth
+	./services/team
+	./tools/migrator
+)

@@ -1,0 +1,3 @@
+SET search_path TO audit;
+DROP TABLE IF EXISTS events;
+DROP SCHEMA IF EXISTS audit CASCADE;

@@ -1,0 +1,262 @@
+# Phase-00 stub: infra only (PG + Redis + NATS). Svc images added in later phases.
+name: seta
+
+networks:
+  seta:
+    driver: bridge
+
+volumes:
+  pg_data:
+  nats_data:
+  loki_data:
+  grafana_data:
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: seta-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-seta}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-seta_dev_pw}
+      POSTGRES_DB: ${POSTGRES_DB:-seta}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-seta} -d ${POSTGRES_DB:-seta}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [seta]
+
+  redis:
+    image: redis:7-alpine
+    container_name: seta-redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [seta]
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: seta-nats
+    restart: unless-stopped
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "${NATS_PORT:-4222}:4222"
+      - "${NATS_MON_PORT:-8222}:8222"
+    volumes:
+      - nats_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [seta]
+
+  migrator-auth:
+    build:
+      context: .
+      dockerfile: deploy/migrator/Dockerfile
+    container_name: seta-migrator-auth
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["-path=/migrations/auth", "-database=postgres://${POSTGRES_USER:-seta}:${POSTGRES_PASSWORD:-seta_dev_pw}@postgres:5432/${POSTGRES_DB:-seta}?sslmode=disable&x-migrations-table=auth_schema_migrations", "up"]
+    restart: "no"
+    networks: [seta]
+
+  migrator-team:
+    build:
+      context: .
+      dockerfile: deploy/migrator/Dockerfile
+    container_name: seta-migrator-team
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["-path=/migrations/team", "-database=postgres://${POSTGRES_USER:-seta}:${POSTGRES_PASSWORD:-seta_dev_pw}@postgres:5432/${POSTGRES_DB:-seta}?sslmode=disable&x-migrations-table=team_schema_migrations", "up"]
+    restart: "no"
+    networks: [seta]
+
+  migrator-asset:
+    build:
+      context: .
+      dockerfile: deploy/migrator/Dockerfile
+    container_name: seta-migrator-asset
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["-path=/migrations/asset", "-database=postgres://${POSTGRES_USER:-seta}:${POSTGRES_PASSWORD:-seta_dev_pw}@postgres:5432/${POSTGRES_DB:-seta}?sslmode=disable&x-migrations-table=asset_schema_migrations", "up"]
+    restart: "no"
+    networks: [seta]
+
+  migrator-audit:
+    build:
+      context: .
+      dockerfile: deploy/migrator/Dockerfile
+    container_name: seta-migrator-audit
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["-path=/migrations/audit", "-database=postgres://${POSTGRES_USER:-seta}:${POSTGRES_PASSWORD:-seta_dev_pw}@postgres:5432/${POSTGRES_DB:-seta}?sslmode=disable&x-migrations-table=audit_schema_migrations", "up"]
+    restart: "no"
+    networks: [seta]
+
+  audit-worker:
+    build:
+      context: .
+      dockerfile: services/audit-worker/Dockerfile
+    container_name: seta-audit-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrator-audit:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_DSN: "postgres://${POSTGRES_USER:-seta}:${POSTGRES_PASSWORD:-seta_dev_pw}@postgres:5432/${POSTGRES_DB:-seta}?sslmode=disable"
+      NATS_URL: "nats://nats:4222"
+      LOG_LEVEL: "info"
+    networks: [seta]
+
+  auth-svc:
+    build:
+      context: .
+      dockerfile: services/auth/Dockerfile
+    container_name: seta-auth
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrator-auth:
+        condition: service_completed_successfully
+    environment:
+      AUTH_HTTP_PORT: "8081"
+      POSTGRES_DSN: "postgres://${POSTGRES_USER:-seta}:${POSTGRES_PASSWORD:-seta_dev_pw}@postgres:5432/${POSTGRES_DB:-seta}?sslmode=disable"
+      REDIS_ADDR: "redis:6379"
+      JWT_SECRET: "${JWT_SECRET:-changeme_changeme_changeme_changeme_changeme_}"
+      JWT_ACCESS_TTL: "15m"
+      JWT_REFRESH_TTL: "168h"
+      BCRYPT_COST: "12"
+      LOG_LEVEL: "info"
+    ports:
+      - "${AUTH_HTTP_PORT:-8081}:8081"
+    networks: [seta]
+    # No container-side healthcheck: distroless has no shell/curl.
+    # /healthz available on HTTP; verify externally w/ `make e2e`.
+
+  team-svc:
+    build:
+      context: .
+      dockerfile: services/team/Dockerfile
+    container_name: seta-team
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrator-team:
+        condition: service_completed_successfully
+      auth-svc:
+        condition: service_started
+      nats:
+        condition: service_healthy
+    environment:
+      TEAM_HTTP_PORT: "8082"
+      POSTGRES_DSN: "postgres://${POSTGRES_USER:-seta}:${POSTGRES_PASSWORD:-seta_dev_pw}@postgres:5432/${POSTGRES_DB:-seta}?sslmode=disable"
+      JWT_SECRET: "${JWT_SECRET:-changeme_changeme_changeme_changeme_changeme_}"
+      AUTH_SVC_URL: "http://auth-svc:8081"
+      AUTH_TIMEOUT: "2s"
+      NATS_URL: "nats://nats:4222"
+      REDIS_ADDR: "redis:6379"
+      LOG_LEVEL: "info"
+    ports:
+      - "${TEAM_HTTP_PORT:-8082}:8082"
+    networks: [seta]
+
+  asset-svc:
+    build:
+      context: .
+      dockerfile: services/asset/Dockerfile
+    container_name: seta-asset
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrator-asset:
+        condition: service_completed_successfully
+      team-svc:
+        condition: service_started
+      nats:
+        condition: service_healthy
+    environment:
+      ASSET_HTTP_PORT: "8083"
+      POSTGRES_DSN: "postgres://${POSTGRES_USER:-seta}:${POSTGRES_PASSWORD:-seta_dev_pw}@postgres:5432/${POSTGRES_DB:-seta}?sslmode=disable"
+      JWT_SECRET: "${JWT_SECRET:-changeme_changeme_changeme_changeme_changeme_}"
+      TEAM_SVC_URL: "http://team-svc:8082"
+      TEAM_TIMEOUT: "2s"
+      NATS_URL: "nats://nats:4222"
+      REDIS_ADDR: "redis:6379"
+      LOG_LEVEL: "info"
+    ports:
+      - "${ASSET_HTTP_PORT:-8083}:8083"
+    networks: [seta]
+
+  loki:
+    image: grafana/loki:3.2.1
+    container_name: seta-loki
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/local-config.yml"]
+    volumes:
+      - ./deploy/loki/loki-config.yml:/etc/loki/local-config.yml:ro
+      - loki_data:/loki
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3100/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [seta]
+
+  promtail:
+    image: grafana/promtail:3.2.1
+    container_name: seta-promtail
+    restart: unless-stopped
+    command: ["-config.file=/etc/promtail/config.yml"]
+    volumes:
+      - ./deploy/promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    depends_on:
+      loki:
+        condition: service_healthy
+    networks: [seta]
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: seta-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    depends_on:
+      loki:
+        condition: service_healthy
+    networks: [seta]

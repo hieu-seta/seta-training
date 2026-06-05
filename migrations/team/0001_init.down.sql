@@ -1,0 +1,5 @@
+SET search_path TO team;
+DROP TABLE IF EXISTS team_managers;
+DROP TABLE IF EXISTS team_members;
+DROP TABLE IF EXISTS teams;
+DROP SCHEMA IF EXISTS team CASCADE;

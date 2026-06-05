@@ -1,0 +1,3 @@
+SET search_path TO auth;
+DROP TABLE IF EXISTS users;
+DROP SCHEMA IF EXISTS auth CASCADE;
